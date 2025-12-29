@@ -1,68 +1,223 @@
 """
 =============================================================================
-LLM 기반 Tool들
+LLM 기반 Tool들 (Responses API 표준화 버전)
 =============================================================================
 
-이 파일은 OpenAI Chat Completions API를 사용하는 LLM Tool들을 포함합니다.
+변경 요약
+1) SummarizeTool/TranslateTool/ExtractInfoTool/AnalyzeTool/GenerateTool:
+   - 기존 LLMTool(Chat Completions 전용) 의존을 제거하고
+   - ResponsesLLMTool(Responses API 전용 베이스)로 전환
 
-## LLM Tool 개발 가이드
+2) VisionExtractTool:
+   - /chat/completions -> /responses
+   - messages+image_url/text -> instructions + input + (input_text/input_image)
+   - response_format -> text.format(json_object)
+   - output_text / output[] 기반 파싱
+   - usage: input_tokens/output_tokens/total_tokens
 
-LLM Tool은 LLMTool 기본 클래스를 상속받아 구현합니다.
-프롬프트는 Workflow Node에서 설정하므로, Tool에서는 기본 설정만 정의합니다.
-
-### 특징
-
-1. Node의 prompt 설정 사용
-   - system: 시스템 프롬프트
-   - user: 사용자 프롬프트 ({{input.xxx}} 템플릿)
-   - force_json: JSON 응답 강제
-
-2. 자동 템플릿 렌더링
-   - {{input.text}} -> inputs["text"] 값으로 치환
-   - {{input.data.key}} -> inputs["data"]["key"] 값으로 치환
-
-3. 토큰 사용량 자동 기록
-   - context["token_usage"]에 저장됨
-
+주의
+- 이 파일만 바꿔도 동작하게 하려면, llm_service 의존을 제거하고
+  여기서 직접 httpx로 호출하도록 구성했습니다.
+- 만약 조직 표준이 llm_service 경유라면, 별도로 llm_service 자체를 Responses로 표준화해야 합니다.
 =============================================================================
 """
 
-from app.tools.base import LLMTool, BaseTool, ToolParameter, ToolParameterType, WorkflowError, ErrorCode
-from typing import Any
+from typing import Any, Optional
+import json
+import httpx
+
+from app.tools.base import BaseTool, ToolParameter, ToolParameterType, WorkflowError, ErrorCode
 
 
-class SummarizeTool(LLMTool):
+# =============================================================================
+# Responses API 공통 헬퍼 / 베이스
+# =============================================================================
+
+def _join_url(base: str, path: str) -> str:
+    base = (base or "").rstrip("/")
+    path = (path or "").lstrip("/")
+    return f"{base}/{path}"
+
+
+def _extract_responses_output_text(resp_json: dict) -> str:
     """
-    텍스트 요약 Tool
-    
-    LLM을 사용하여 텍스트를 요약합니다.
-    Node에서 프롬프트를 설정하여 요약 스타일을 지정할 수 있습니다.
-    
-    Input:
-        - text: 요약할 텍스트
-    
-    Output:
-        - summary: 요약 결과 (force_json=true인 경우)
-        - 또는 result: 요약 결과 (force_json=false인 경우)
-    
-    Node 프롬프트 예시:
-        {
-            "system": "You are a professional summarizer.",
-            "user": "Summarize the following text in 3 bullet points:\\n\\n{{input.text}}",
-            "force_json": true
+    Responses API 응답에서 텍스트를 안전하게 추출
+    - output_text가 있으면 우선 사용
+    - 없으면 output[] -> message -> content[]의 output_text를 조립
+    """
+    if not isinstance(resp_json, dict):
+        return ""
+
+    ot = resp_json.get("output_text")
+    if isinstance(ot, str) and ot.strip():
+        return ot.strip()
+
+    chunks: list[str] = []
+    for item in resp_json.get("output", []) or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "message":
+            continue
+        for part in item.get("content", []) or []:
+            if isinstance(part, dict) and part.get("type") == "output_text":
+                t = part.get("text", "")
+                if isinstance(t, str) and t:
+                    chunks.append(t)
+
+    return "\n".join(chunks).strip()
+
+
+class ResponsesLLMTool(BaseTool):
+    """
+    Responses API 기반 LLM Tool 베이스 클래스
+
+    Node prompt 설정 사용:
+      - system: 시스템 프롬프트
+      - user: 사용자 프롬프트 ({{input.xxx}} 템플릿)
+      - force_json: JSON 응답 강제
+
+    Context에서 settings를 사용합니다:
+      - app.core.config.settings.OPENAI_API_KEY
+      - app.core.config.settings.OPENAI_API_BASE
+
+    선택적으로 prompt_config에 model을 넣을 수 있습니다:
+      - context["prompt"]["model"]  (예: "gpt-5")
+    """
+
+    has_prompt: bool = True
+
+    default_model: str = "gpt-5"
+    default_system_prompt: str = "You are a helpful assistant."
+    default_temperature: float = 0.7
+    default_max_output_tokens: int = 2000
+
+    async def execute(self, inputs: dict, context: dict) -> dict:
+        from app.core.config import settings
+
+        prompt_config = context.get("prompt", {})
+        system_prompt = prompt_config.get("system", self.default_system_prompt)
+        user_template = prompt_config.get("user", "")
+        force_json = bool(prompt_config.get("force_json", False))
+
+        # 모델 선택 (Node에서 override 가능)
+        model = prompt_config.get("model", getattr(self, "default_model", "gpt-5"))
+
+        user_prompt = self._render_template(user_template, inputs)
+
+        api_key = settings.OPENAI_API_KEY
+        api_base = settings.OPENAI_API_BASE
+        if not api_key:
+            raise WorkflowError(code=ErrorCode.INTERNAL_ERROR, message="OpenAI API key not configured")
+        if not api_base:
+            raise WorkflowError(code=ErrorCode.INTERNAL_ERROR, message="OpenAI API base not configured")
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "instructions": system_prompt,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": user_prompt}
+                    ],
+                }
+            ],
+            "max_output_tokens": int(getattr(self, "default_max_output_tokens", self.default_max_output_tokens)),
+            # temperature는 Responses에서도 지원되는 경우가 있으나,
+            # 게이트웨이/SDK 호환성을 위해 선택적으로만 넣습니다.
+            "temperature": float(getattr(self, "default_temperature", self.default_temperature)),
         }
-    """
-    
+
+        if force_json:
+            payload["text"] = {"format": {"type": "json_object"}}
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        url = _join_url(api_base, "/responses")
+
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+
+        if resp.status_code != 200:
+            detail = resp.text
+            try:
+                ej = resp.json()
+                detail = ej.get("error", {}).get("message", detail)
+            except Exception:
+                pass
+            raise WorkflowError(
+                code=ErrorCode.LLM_API_ERROR,
+                message=f"OpenAI API error: {detail}",
+                details={"status_code": resp.status_code, "model": model},
+            )
+
+        resp_json = resp.json()
+
+        # usage 기록 (Responses 포맷)
+        usage = resp_json.get("usage", {}) or {}
+        context["token_usage"] = {
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+        }
+
+        raw_text = _extract_responses_output_text(resp_json)
+
+        if force_json:
+            try:
+                parsed = json.loads(raw_text) if raw_text else {}
+                # JSON 강제인 경우, Tool의 output_schema에 맞춰 result로 감싸는 게 안전
+                return {"result": parsed}
+            except json.JSONDecodeError:
+                return {"result": {"raw_response": raw_text}}
+
+        return {"result": raw_text}
+
+    # -------------------------
+    # 템플릿 렌더러 (base.py와 동일 로직)
+    # -------------------------
+    def _render_template(self, template: str, inputs: dict) -> str:
+        import re
+
+        def replace_placeholder(match):
+            path = match.group(1)
+            parts = path.split(".")
+            if parts[0] == "input" and len(parts) > 1:
+                key = ".".join(parts[1:])
+                value = self._get_nested_value(inputs, key)
+                return str(value) if value is not None else ""
+            return match.group(0)
+
+        return re.sub(r"\{\{([^}]+)\}\}", replace_placeholder, template)
+
+    def _get_nested_value(self, data: dict, path: str) -> Any:
+        keys = path.split(".")
+        value: Any = data
+        for key in keys:
+            if isinstance(value, dict):
+                value = value.get(key)
+            else:
+                return None
+        return value
+
+
+# =============================================================================
+# Text LLM Tools (ResponsesLLMTool로 전환)
+# =============================================================================
+
+class SummarizeTool(ResponsesLLMTool):
     tool_id = "llm.summarize"
     version = "1.0.0"
     name = "Text Summarizer"
     description = "LLM을 사용하여 텍스트를 요약합니다"
     category = "llm"
-    
+
     default_system_prompt = "You are a professional text summarizer. Provide clear and concise summaries."
-    # default_temperature = 0.5
-    default_max_tokens = 10000
-    
+    default_max_output_tokens = 10000
+
     input_schema = [
         ToolParameter(
             name="text",
@@ -71,229 +226,126 @@ class SummarizeTool(LLMTool):
             required=True
         )
     ]
-    
+
     output_schema = [
-        ToolParameter(
-            name="summary",
-            type=ToolParameterType.STRING,
-            description="요약 결과"
-        ),
-        ToolParameter(
-            name="result",
-            type=ToolParameterType.STRING,
-            description="요약 결과 (대체 키)"
-        )
+        ToolParameter(name="summary", type=ToolParameterType.STRING, description="요약 결과"),
+        ToolParameter(name="result", type=ToolParameterType.STRING, description="요약 결과 (대체 키)"),
     ]
 
 
-class TranslateTool(LLMTool):
-    """
-    텍스트 번역 Tool
-    
-    LLM을 사용하여 텍스트를 번역합니다.
-    """
-    
+class TranslateTool(ResponsesLLMTool):
     tool_id = "llm.translate"
     version = "1.0.0"
     name = "Text Translator"
     description = "LLM을 사용하여 텍스트를 번역합니다"
     category = "llm"
-    
+
     default_system_prompt = "You are a professional translator. Translate accurately while maintaining the original meaning and tone."
     default_temperature = 0.3
-    default_max_tokens = 2000
-    
+    default_max_output_tokens = 2000
+
     input_schema = [
-        ToolParameter(
-            name="text",
-            type=ToolParameterType.STRING,
-            description="번역할 텍스트",
-            required=True
-        ),
+        ToolParameter(name="text", type=ToolParameterType.STRING, description="번역할 텍스트", required=True),
         ToolParameter(
             name="target_language",
             type=ToolParameterType.STRING,
             description="대상 언어 (예: Korean, English, Japanese)",
             required=False,
-            default="English"
-        )
-    ]
-    
-    output_schema = [
-        ToolParameter(
-            name="translated",
-            type=ToolParameterType.STRING,
-            description="번역 결과"
+            default="English",
         ),
-        ToolParameter(
-            name="result",
-            type=ToolParameterType.STRING,
-            description="번역 결과 (대체 키)"
-        )
+    ]
+
+    output_schema = [
+        ToolParameter(name="translated", type=ToolParameterType.STRING, description="번역 결과"),
+        ToolParameter(name="result", type=ToolParameterType.STRING, description="번역 결과 (대체 키)"),
     ]
 
 
-class ExtractInfoTool(LLMTool):
-    """
-    정보 추출 Tool
-    
-    LLM을 사용하여 텍스트에서 구조화된 정보를 추출합니다.
-    Node의 프롬프트에서 추출할 정보의 형식을 JSON으로 정의합니다.
-    
-    Node 프롬프트 예시:
-        {
-            "system": "You extract structured information from text.",
-            "user": "Extract the following from the text:\\n- name\\n- email\\n- phone\\n\\nText: {{input.text}}\\n\\nRespond in JSON format.",
-            "force_json": true
-        }
-    """
-    
+class ExtractInfoTool(ResponsesLLMTool):
     tool_id = "llm.extract"
     version = "1.0.0"
     name = "Information Extractor"
     description = "LLM을 사용하여 텍스트에서 구조화된 정보를 추출합니다"
     category = "llm"
-    
-    default_system_prompt = "You extract structured information from text. Always respond in valid JSON format."
+
+    default_system_prompt = "You extract structured information from text."
     default_temperature = 0.2
-    default_max_tokens = 1000
-    
+    default_max_output_tokens = 1000
+
     input_schema = [
-        ToolParameter(
-            name="text",
-            type=ToolParameterType.STRING,
-            description="정보를 추출할 텍스트",
-            required=True
-        )
+        ToolParameter(name="text", type=ToolParameterType.STRING, description="정보를 추출할 텍스트", required=True)
     ]
-    
+
     output_schema = [
-        ToolParameter(
-            name="result",
-            type=ToolParameterType.OBJECT,
-            description="추출된 정보 (JSON)"
-        )
+        ToolParameter(name="result", type=ToolParameterType.OBJECT, description="추출된 정보 (JSON)")
     ]
 
 
-class AnalyzeTool(LLMTool):
-    """
-    텍스트 분석 Tool
-    
-    LLM을 사용하여 텍스트를 분석합니다.
-    감성 분석, 키워드 추출, 카테고리 분류 등에 사용할 수 있습니다.
-    """
-    
+class AnalyzeTool(ResponsesLLMTool):
     tool_id = "llm.analyze"
     version = "1.0.0"
     name = "Text Analyzer"
     description = "LLM을 사용하여 데이터를 분석합니다"
     category = "llm"
-    
+
     default_system_prompt = "You are an expert text analyst. Provide thorough and insightful analysis."
     default_temperature = 0.5
-    default_max_tokens = 1500
-    
+    default_max_output_tokens = 1500
+
     input_schema = [
-        ToolParameter(
-            name="text",
-            type=ToolParameterType.STRING,
-            description="분석할 텍스트",
-            required=True
-        )
+        ToolParameter(name="text", type=ToolParameterType.STRING, description="분석할 텍스트", required=True)
     ]
-    
+
     output_schema = [
-        ToolParameter(
-            name="analysis",
-            type=ToolParameterType.STRING,
-            description="분석 결과"
-        ),
-        ToolParameter(
-            name="result",
-            type=ToolParameterType.OBJECT,
-            description="분석 결과 (JSON, force_json=true인 경우)"
-        )
+        ToolParameter(name="analysis", type=ToolParameterType.STRING, description="분석 결과"),
+        ToolParameter(name="result", type=ToolParameterType.OBJECT, description="분석 결과 (JSON, force_json=true인 경우)"),
     ]
 
 
-class GenerateTool(LLMTool):
-    """
-    텍스트 생성 Tool
-    
-    LLM을 사용하여 텍스트를 생성합니다.
-    이메일, 보고서, 글 등을 생성하는 데 사용합니다.
-    """
-    
+class GenerateTool(ResponsesLLMTool):
     tool_id = "llm.generate"
     version = "1.0.0"
     name = "Text Generator"
     description = "LLM을 사용하여 텍스트를 생성합니다"
     category = "llm"
-    
+
     default_system_prompt = "You are a professional content writer. Generate high-quality content based on the given instructions."
     default_temperature = 0.7
-    default_max_tokens = 2000
-    
+    default_max_output_tokens = 2000
+
     input_schema = [
-        ToolParameter(
-            name="prompt",
-            type=ToolParameterType.STRING,
-            description="생성 지시사항 또는 주제",
-            required=True
-        ),
-        ToolParameter(
-            name="context",
-            type=ToolParameterType.STRING,
-            description="추가 컨텍스트 (선택)",
-            required=False,
-            default=""
-        )
-    ]
-    
-    output_schema = [
-        ToolParameter(
-            name="generated",
-            type=ToolParameterType.STRING,
-            description="생성된 텍스트"
-        ),
-        ToolParameter(
-            name="result",
-            type=ToolParameterType.STRING,
-            description="생성된 텍스트 (대체 키)"
-        )
+        ToolParameter(name="prompt", type=ToolParameterType.STRING, description="생성 지시사항 또는 주제", required=True),
+        ToolParameter(name="context", type=ToolParameterType.STRING, description="추가 컨텍스트 (선택)", required=False, default=""),
     ]
 
+    output_schema = [
+        ToolParameter(name="generated", type=ToolParameterType.STRING, description="생성된 텍스트"),
+        ToolParameter(name="result", type=ToolParameterType.STRING, description="생성된 텍스트 (대체 키)"),
+    ]
+
+
+# =============================================================================
+# VisionExtractTool (Responses API로 전환)
+# =============================================================================
 
 class VisionExtractTool(BaseTool):
     """
-    Vision Extract Tool (GPT-4o 기반)
-    
-    이미지에서 GPT-4o Vision으로 정보를 추출합니다.
-    PDF to Images Tool과 연결하여 사용하거나,
-    직접 이미지 base64를 입력받아 분석합니다.
-    
+    Vision Extract Tool (Responses API 기반)
+
     Input:
-        - images: base64 이미지 배열 (PDF to Images 출력과 연결)
-        - prompt: 추출/분석 지시사항 (자연어)
-        - output_format: 출력 형식 ("text", "json")
-    
-    Output:
-        - result: GPT-4o Vision 분석 결과
-        - raw_text: 원본 텍스트 응답
-    
-    Workflow 예시:
-        [pdf.to_images] → images → [llm.vision_extract]
-        프롬프트: "이 문서에서 계약 금액, 날짜, 서명자를 추출해줘"
+        - images: base64 이미지 배열
+        - prompt: 추출/분석 지시사항
+        - output_format: "text" | "json"
+        - model: 기본 gpt-5
     """
-    
+
     tool_id = "llm.vision_extract"
     version = "1.0.0"
     name = "Vision Extractor (GPT-5)"
-    description = "이미지에서 GPT-5 Vision으로 정보를 추출합니다. 표, 차트, 손글씨 인식 가능."
+    description = "이미지에서 GPT-5로 정보를 추출합니다. 표, 차트, 손글씨 인식 가능."
     category = "llm"
-    has_prompt = False  # 프롬프트는 input으로 직접 받음
-    
+    has_prompt = False
+
     input_schema = [
         ToolParameter(
             name="images",
@@ -317,148 +369,114 @@ class VisionExtractTool(BaseTool):
         ToolParameter(
             name="model",
             type=ToolParameterType.STRING,
-            description="사용할 모델: 'gpt-5' 또는 'gpt-5' (기본값: 'gpt-5')",
+            description="사용할 모델 (기본값: 'gpt-5')",
             required=False,
             default="gpt-5"
         )
     ]
-    
+
     output_schema = [
-        ToolParameter(
-            name="result",
-            type=ToolParameterType.OBJECT,
-            description="GPT-5 Vision 분석 결과"
-        ),
-        ToolParameter(
-            name="raw_text",
-            type=ToolParameterType.STRING,
-            description="원본 텍스트 응답"
-        )
+        ToolParameter(name="result", type=ToolParameterType.OBJECT, description="분석 결과 (json이면 object, text면 string)"),
+        ToolParameter(name="raw_text", type=ToolParameterType.STRING, description="원본 텍스트 응답"),
     ]
-    
+
     async def execute(self, inputs: dict, context: dict) -> dict:
-        """Vision 분석 실행"""
-        import httpx
-        import json
         from app.core.config import settings
-        
+
         images = inputs.get("images", [])
         prompt = inputs.get("prompt", "")
         output_format = inputs.get("output_format", "json")
         model = inputs.get("model", "gpt-5")
-        
+
         if not images:
             raise WorkflowError(
                 code=ErrorCode.TOOL_INPUT_INVALID,
                 message="No images provided",
                 details={"images_count": 0}
             )
-        
         if not prompt:
             raise WorkflowError(
                 code=ErrorCode.TOOL_INPUT_INVALID,
                 message="Prompt is required",
                 details={}
             )
-        
+
         api_key = settings.OPENAI_API_KEY
         api_base = settings.OPENAI_API_BASE
-        
         if not api_key:
-            raise WorkflowError(
-                code=ErrorCode.INTERNAL_ERROR,
-                message="OpenAI API key not configured"
-            )
-        
-        # 시스템 프롬프트 구성
-        system_prompt = """You are an expert document and image analyzer. 
-Analyze the provided images and extract information as requested.
-Be thorough and accurate. If you can't find certain information, explicitly state that."""
-        
-        if output_format == "json":
-            system_prompt += "\n\nIMPORTANT: Respond in valid JSON format only."
-        
-        # 메시지 구성 (이미지들 포함)
-        content = [{"type": "text", "text": prompt}]
-        
+            raise WorkflowError(code=ErrorCode.INTERNAL_ERROR, message="OpenAI API key not configured")
+        if not api_base:
+            raise WorkflowError(code=ErrorCode.INTERNAL_ERROR, message="OpenAI API base not configured")
+
+        system_prompt = (
+            "You are an expert document and image analyzer. "
+            "Analyze the provided images and extract information as requested. "
+            "Be thorough and accurate. If you can't find certain information, explicitly state that."
+        )
+
+        # Responses 멀티모달 content 구성
+        content: list[dict] = [{"type": "input_text", "text": prompt}]
         for img_base64 in images:
-            # data:image/png;base64, 형식인지 확인
-            if not img_base64.startswith("data:"):
+            # data URL 형태로 정규화
+            if isinstance(img_base64, str) and not img_base64.startswith("data:"):
                 img_base64 = f"data:image/png;base64,{img_base64}"
-            
-            content.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": img_base64,
-                    "detail": "high"
-                }
-            })
-        
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": content}
-        ]
-        
-        payload = {
+            content.append({"type": "input_image", "image_url": img_base64})
+
+        payload: dict[str, Any] = {
             "model": model,
-            "input": messages,
+            "instructions": system_prompt,
+            "input": [{"role": "user", "content": content}],
             "max_output_tokens": 16000,
         }
-        
+
         if output_format == "json":
-            payload["response_format"] = {"type": "json_object"}
-        
+            payload["text"] = {"format": {"type": "json_object"}}
+
         headers = {
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
-        
+
+        url = _join_url(api_base, "/responses")
+
         try:
             async with httpx.AsyncClient(timeout=180.0) as client:
-                response = await client.post(
-                    f"{api_base}/chat/completions",
-                    json=payload,
-                    headers=headers
+                resp = await client.post(url, json=payload, headers=headers)
+
+            if resp.status_code != 200:
+                detail = resp.text
+                try:
+                    ej = resp.json()
+                    detail = ej.get("error", {}).get("message", detail)
+                except Exception:
+                    pass
+                raise WorkflowError(
+                    code=ErrorCode.LLM_API_ERROR,
+                    message=f"OpenAI Vision API error: {detail}",
+                    details={"status_code": resp.status_code, "model": model},
                 )
-                
-                if response.status_code != 200:
-                    error_detail = response.text
-                    try:
-                        error_json = response.json()
-                        error_detail = error_json.get("error", {}).get("message", error_detail)
-                    except:
-                        pass
-                    
-                    raise WorkflowError(
-                        code=ErrorCode.LLM_API_ERROR,
-                        message=f"OpenAI Vision API error: {error_detail}",
-                        details={"status_code": response.status_code, "model": model}
-                    )
-                
-                result = response.json()
-                content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-                
-                # 토큰 사용량 기록
-                usage = result.get("usage", {})
-                context["token_usage"] = {
-                    "prompt_tokens": usage.get("prompt_tokens", 0),
-                    "completion_tokens": usage.get("completion_tokens", 0),
-                    "total_tokens": usage.get("total_tokens", 0)
-                }
-                
-                # JSON 파싱 시도
-                parsed = None
-                if output_format == "json":
-                    try:
-                        parsed = json.loads(content)
-                    except json.JSONDecodeError:
-                        parsed = {"raw_response": content}
-                
-                return {
-                    "result": parsed if parsed else content,
-                    "raw_text": content
-                }
-                
+
+            resp_json = resp.json()
+
+            # usage 기록 (Responses 포맷)
+            usage = resp_json.get("usage", {}) or {}
+            context["token_usage"] = {
+                "input_tokens": usage.get("input_tokens", 0),
+                "output_tokens": usage.get("output_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0),
+            }
+
+            raw_text = _extract_responses_output_text(resp_json)
+
+            if output_format == "json":
+                try:
+                    parsed = json.loads(raw_text) if raw_text else {}
+                except json.JSONDecodeError:
+                    parsed = {"raw_response": raw_text}
+                return {"result": parsed, "raw_text": raw_text}
+
+            return {"result": raw_text, "raw_text": raw_text}
+
         except httpx.TimeoutException:
             raise WorkflowError(
                 code=ErrorCode.LLM_API_ERROR,
@@ -472,38 +490,3 @@ Be thorough and accurate. If you can't find certain information, explicitly stat
                 details={"error": str(e)},
                 retryable=True
             )
-
-
-# =============================================================================
-# 새로운 LLM Tool 추가 방법
-# =============================================================================
-#
-# 1. LLMTool 클래스 상속
-# 2. tool_id, version, name, description 정의
-# 3. input_schema, output_schema 정의
-# 4. (선택) default_system_prompt, default_temperature, default_max_tokens 설정
-#
-# execute() 메서드는 LLMTool에서 이미 구현되어 있으므로
-# 대부분의 경우 오버라이드할 필요가 없습니다.
-#
-# 예시:
-#
-# class QATool(LLMTool):
-#     tool_id = "llm.qa"
-#     version = "1.0.0"
-#     name = "Question Answerer"
-#     description = "질문에 대한 답변을 생성합니다"
-#     category = "llm"
-#     
-#     default_system_prompt = "You answer questions based on the given context."
-#     
-#     input_schema = [
-#         ToolParameter(name="question", type=ToolParameterType.STRING, ...),
-#         ToolParameter(name="context", type=ToolParameterType.STRING, ...),
-#     ]
-#     
-#     output_schema = [
-#         ToolParameter(name="answer", type=ToolParameterType.STRING, ...),
-#     ]
-#
-# =============================================================================
