@@ -1,17 +1,23 @@
 """
 =============================================================================
-PDF 관련 Tool들 (Responses API 표준화 + 고해상도 안정화 + Text/Markdown 옵션)
+PDF 관련 Tool들 (Responses API 표준화 + 고해상도 안정화 + Option A 적용)
 =============================================================================
 
-포함 사항
-- PDFExtractTool / PDFInfoTool / PDFToImagesTool: 기존 로직 유지
+Option A 적용 포인트
+- PDFVisionExtractTool.output_schema의 result를 STRING으로 변경
+- PDFVisionExtractTool.execute()에서 result에 Markdown/Text 문자열을 직접 반환
+  -> UI에서 JSON wrapper처럼 보이는 문제를 최소화 (대부분의 프런트가 문자열을 더 잘 렌더)
+
+기능
+- PDFExtractTool: PyPDF2 텍스트 추출
+- PDFInfoTool: PDF 메타데이터
+- PDFToImagesTool: PNG base64 변환(기존 유지)
 - PDFVisionExtractTool:
   * OpenAI Responses API (/v1/responses)
-  * 멀티모달: input_text / input_image
-  * JSON 강제 시 prompt에 'json' 자동 삽입
-  * PDF->Image: DPI 300, max_side 제한, JPEG 인코딩(quality=85), 누적 base64 가드
-  * 예외처리: timeout/request/unexpected 분리 (에러 메시지 유실 방지)
-  * (추가) output_format="text"일 때 markdown=True면 Markdown으로 보기 좋게 포맷팅
+  * 이미지 입력: input_image
+  * Text 출력 시 Markdown 옵션 제공(markdown=True)
+  * JSON 출력 시 text.format json_object + prompt에 'json' 강제 포함
+  * DPI 300 + JPEG 인코딩 + base64 누적 크기 가드로 안정화
 =============================================================================
 """
 
@@ -146,31 +152,33 @@ class PDFInfoTool(BaseTool):
 
 class PDFVisionExtractTool(BaseTool):
     """
-    PDF Vision Extract Tool (Responses API 기반, 안정화 + Text/Markdown 옵션)
+    PDF Vision Extract Tool (Responses API 기반, 안정화 + Option A)
+    - result는 STRING으로 반환 (Markdown/Text)
     """
+
     tool_id = "pdf.vision_extract"
-    version = "1.0.0"
+    version = "1.0.1"
     name = "PDF Vision Extractor (GPT-5 / Responses API)"
     description = "PDF를 이미지로 변환 후 GPT-5(Responses API)로 분석합니다. 스캔 PDF, 표, 차트 인식 가능."
     category = "file"
     has_prompt = False
 
-    # 안정화 기본값
     DEFAULT_DPI = 300
     MAX_IMAGE_SIDE = 5000
     JPEG_QUALITY = 85
-    BASE64_TOTAL_CHAR_LIMIT = 25_000_000  # 약 25MB(문자수 기준) — 환경에 따라 조정
+    BASE64_TOTAL_CHAR_LIMIT = 25_000_000  # 문자수 기준(대략 20~25MB 수준)
 
     input_schema = [
         ToolParameter(name="file_ref", type=ToolParameterType.STRING, description="업로드된 PDF 파일 참조 ID", required=True),
         ToolParameter(name="prompt", type=ToolParameterType.STRING, description="추출/분석 지시사항", required=True),
-        ToolParameter(name="pages", type=ToolParameterType.STRING, description="분석할 페이지: '1', '1-3', 'all' (기본값: '1')", required=False, default="1"),
-        ToolParameter(name="output_format", type=ToolParameterType.STRING, description="출력 형식: 'text' 또는 'json' (기본값: 'json')", required=False, default="json"),
-        ToolParameter(name="markdown", type=ToolParameterType.BOOLEAN, description="text 출력일 때 Markdown으로 보기 좋게 포맷팅 (기본값: True)", required=False, default=True),
+        ToolParameter(name="pages", type=ToolParameterType.STRING, description="분석할 페이지: '1', '1-3', 'all'", required=False, default="1"),
+        ToolParameter(name="output_format", type=ToolParameterType.STRING, description="'text' 또는 'json'", required=False, default="text"),
+        ToolParameter(name="markdown", type=ToolParameterType.BOOLEAN, description="text 출력일 때 Markdown 포맷 사용", required=False, default=True),
     ]
 
+    # ✅ Option A: result를 STRING으로
     output_schema = [
-        ToolParameter(name="result", type=ToolParameterType.OBJECT, description="분석 결과 (json이면 object, text이면 string)"),
+        ToolParameter(name="result", type=ToolParameterType.STRING, description="분석 결과 (Markdown 또는 JSON 문자열)"),
         ToolParameter(name="raw_text", type=ToolParameterType.STRING, description="원본 텍스트 응답"),
         ToolParameter(name="pages_analyzed", type=ToolParameterType.INTEGER, description="분석된 페이지 수"),
     ]
@@ -181,7 +189,7 @@ class PDFVisionExtractTool(BaseTool):
         file_ref = inputs.get("file_ref")
         prompt = inputs.get("prompt", "")
         pages_input = inputs.get("pages", "1")
-        output_format = inputs.get("output_format", "json")
+        output_format = inputs.get("output_format", "text")
         markdown = inputs.get("markdown", True)
 
         file_service = context.get("file_service")
@@ -210,31 +218,35 @@ class PDFVisionExtractTool(BaseTool):
         if not images_base64:
             raise WorkflowError(code=ErrorCode.EXECUTION_FAILED, message="No pages to analyze")
 
+        # text 모드 + markdown=True면 Markdown 지시로 래핑
+        if output_format != "json" and markdown:
+            prompt = (
+                "Return the answer in GitHub-flavored Markdown.\n\n"
+                "Structure:\n"
+                "1. **Executive Summary** (2–3 lines)\n"
+                "2. **Findings** (bullet points)\n"
+                "3. **Details** (use Markdown tables if applicable)\n"
+                "4. **Caveats / Limitations** (if any)\n\n"
+                "Rules:\n"
+                "- Do NOT guess missing values\n"
+                "- Only include information visible in the document\n\n"
+                f"User request:\n{prompt}"
+            )
+
         try:
             result = await self._call_vision_api(
                 images_base64=images_base64,
                 image_mime=mime_type,
                 prompt=prompt,
                 output_format=output_format,
-                markdown=markdown,
                 context=context,
             )
         except WorkflowError:
             raise
         except httpx.TimeoutException as e:
-            raise WorkflowError(
-                code=ErrorCode.LLM_API_ERROR,
-                message="Vision API timeout",
-                details={"error": repr(e)},
-                retryable=True,
-            )
+            raise WorkflowError(code=ErrorCode.LLM_API_ERROR, message="Vision API timeout", details={"error": repr(e)}, retryable=True)
         except httpx.RequestError as e:
-            raise WorkflowError(
-                code=ErrorCode.LLM_API_ERROR,
-                message="Vision API request error",
-                details={"error": repr(e)},
-                retryable=True,
-            )
+            raise WorkflowError(code=ErrorCode.LLM_API_ERROR, message="Vision API request error", details={"error": repr(e)}, retryable=True)
         except Exception as e:
             raise WorkflowError(
                 code=ErrorCode.LLM_API_ERROR,
@@ -242,9 +254,12 @@ class PDFVisionExtractTool(BaseTool):
                 details={"traceback": traceback.format_exc()},
             )
 
+        raw_text = result.get("raw", "")
+
+        # ✅ Option A: result는 항상 문자열로 반환
         return {
-            "result": result.get("parsed", result.get("raw", "")),
-            "raw_text": result.get("raw", ""),
+            "result": raw_text,
+            "raw_text": raw_text,
             "pages_analyzed": len(images_base64),
         }
 
@@ -289,6 +304,7 @@ class PDFVisionExtractTool(BaseTool):
             # poppler가 없는 경우 PyMuPDF 시도
             try:
                 import fitz  # PyMuPDF
+                from PIL import Image as PILImage  # noqa
 
                 doc = fitz.open(filepath)
                 try:
@@ -320,7 +336,6 @@ class PDFVisionExtractTool(BaseTool):
                     details={"pdf2image_error": str(e), "pymupdf_error": str(e2)},
                 )
 
-        # JPEG로 인코딩 (payload 절감) + 누적 크기 가드
         images_base64: list[str] = []
         total_chars = 0
 
@@ -333,7 +348,6 @@ class PDFVisionExtractTool(BaseTool):
 
             buffer = io.BytesIO()
             img = img.convert("RGB")
-            # optimize=True는 CPU 비용↑ → progressive로 타협
             img.save(buffer, format="JPEG", quality=self.JPEG_QUALITY, progressive=True)
             buffer.seek(0)
 
@@ -381,7 +395,6 @@ class PDFVisionExtractTool(BaseTool):
         image_mime: str,
         prompt: str,
         output_format: str,
-        markdown: bool,
         context: dict,
     ) -> dict:
         from app.core.config import settings
@@ -398,40 +411,29 @@ class PDFVisionExtractTool(BaseTool):
             "Be thorough and accurate. If you can't find certain information, explicitly state that."
         )
 
-        # JSON 강제 시: Responses 정책상 입력에 'json' 문자열이 반드시 포함되어야 함
+        # JSON 강제 시: Responses 정책상 입력에 'json' 문자열 포함 필요
         if output_format == "json":
             if "json" not in (prompt or "").lower():
                 prompt = (prompt or "").rstrip() + "\n\nReturn the result in JSON format. Respond with valid JSON only."
 
-        # text 모드 + markdown 요청 시: Markdown 포맷 강제
-        if output_format != "json" and markdown:
-            prompt = (
-                "Return the answer in GitHub-flavored Markdown.\n\n"
-                "Structure:\n"
-                "1. **Executive Summary** (2–3 lines)\n"
-                "2. **Findings** (bullet points)\n"
-                "3. **Details** (use Markdown tables if applicable)\n"
-                "4. **Caveats / Limitations** (if any)\n\n"
-                "Rules:\n"
-                "- Do NOT guess missing values\n"
-                "- Only include information visible in the document\n\n"
-                f"User request:\n{prompt}"
-            )
-
         content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
         for img_b64 in images_base64:
-            content.append({
-                "type": "input_image",
-                "image_url": f"data:{image_mime};base64,{img_b64}",
-            })
+            content.append(
+                {
+                    "type": "input_image",
+                    "image_url": f"data:{image_mime};base64,{img_b64}",
+                }
+            )
 
         payload: dict[str, Any] = {
             "model": "gpt-5",
             "instructions": system_prompt,
-            "input": [{
-                "role": "user",
-                "content": content,
-            }],
+            "input": [
+                {
+                    "role": "user",
+                    "content": content,
+                }
+            ],
             "max_output_tokens": 16000,
         }
 
@@ -468,15 +470,7 @@ class PDFVisionExtractTool(BaseTool):
             }
 
             raw_text = self._extract_output_text(resp_json)
-
-            parsed = None
-            if output_format == "json":
-                try:
-                    parsed = json.loads(raw_text) if raw_text else {}
-                except json.JSONDecodeError:
-                    parsed = {"raw_response": raw_text}
-
-            return {"raw": raw_text, "parsed": parsed if output_format == "json" else raw_text}
+            return {"raw": raw_text}
 
 
 class PDFToImagesTool(BaseTool):
