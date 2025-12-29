@@ -1,6 +1,6 @@
 """
 =============================================================================
-PDF 관련 Tool들 (Responses API 표준화 + 고해상도 안정화 - 현재 기준 전체 파일)
+PDF 관련 Tool들 (Responses API 표준화 + 고해상도 안정화 + Text/Markdown 옵션)
 =============================================================================
 
 포함 사항
@@ -11,6 +11,7 @@ PDF 관련 Tool들 (Responses API 표준화 + 고해상도 안정화 - 현재 �
   * JSON 강제 시 prompt에 'json' 자동 삽입
   * PDF->Image: DPI 300, max_side 제한, JPEG 인코딩(quality=85), 누적 base64 가드
   * 예외처리: timeout/request/unexpected 분리 (에러 메시지 유실 방지)
+  * (추가) output_format="text"일 때 markdown=True면 Markdown으로 보기 좋게 포맷팅
 =============================================================================
 """
 
@@ -145,7 +146,7 @@ class PDFInfoTool(BaseTool):
 
 class PDFVisionExtractTool(BaseTool):
     """
-    PDF Vision Extract Tool (Responses API 기반, 안정화 포함)
+    PDF Vision Extract Tool (Responses API 기반, 안정화 + Text/Markdown 옵션)
     """
     tool_id = "pdf.vision_extract"
     version = "1.0.0"
@@ -165,6 +166,7 @@ class PDFVisionExtractTool(BaseTool):
         ToolParameter(name="prompt", type=ToolParameterType.STRING, description="추출/분석 지시사항", required=True),
         ToolParameter(name="pages", type=ToolParameterType.STRING, description="분석할 페이지: '1', '1-3', 'all' (기본값: '1')", required=False, default="1"),
         ToolParameter(name="output_format", type=ToolParameterType.STRING, description="출력 형식: 'text' 또는 'json' (기본값: 'json')", required=False, default="json"),
+        ToolParameter(name="markdown", type=ToolParameterType.BOOLEAN, description="text 출력일 때 Markdown으로 보기 좋게 포맷팅 (기본값: True)", required=False, default=True),
     ]
 
     output_schema = [
@@ -180,6 +182,7 @@ class PDFVisionExtractTool(BaseTool):
         prompt = inputs.get("prompt", "")
         pages_input = inputs.get("pages", "1")
         output_format = inputs.get("output_format", "json")
+        markdown = inputs.get("markdown", True)
 
         file_service = context.get("file_service")
         if not file_service:
@@ -213,6 +216,7 @@ class PDFVisionExtractTool(BaseTool):
                 image_mime=mime_type,
                 prompt=prompt,
                 output_format=output_format,
+                markdown=markdown,
                 context=context,
             )
         except WorkflowError:
@@ -247,7 +251,6 @@ class PDFVisionExtractTool(BaseTool):
     async def _pdf_to_images(self, filepath: str, pages_input: str) -> tuple[list[str], str]:
         """
         PDF를 이미지로 변환하고 base64로 인코딩 (안정화 포함)
-
         반환:
           - images_base64: base64 문자열 리스트 (data: prefix 없음)
           - mime_type: "image/jpeg"
@@ -378,6 +381,7 @@ class PDFVisionExtractTool(BaseTool):
         image_mime: str,
         prompt: str,
         output_format: str,
+        markdown: bool,
         context: dict,
     ) -> dict:
         from app.core.config import settings
@@ -398,6 +402,21 @@ class PDFVisionExtractTool(BaseTool):
         if output_format == "json":
             if "json" not in (prompt or "").lower():
                 prompt = (prompt or "").rstrip() + "\n\nReturn the result in JSON format. Respond with valid JSON only."
+
+        # text 모드 + markdown 요청 시: Markdown 포맷 강제
+        if output_format != "json" and markdown:
+            prompt = (
+                "Return the answer in GitHub-flavored Markdown.\n\n"
+                "Structure:\n"
+                "1. **Executive Summary** (2–3 lines)\n"
+                "2. **Findings** (bullet points)\n"
+                "3. **Details** (use Markdown tables if applicable)\n"
+                "4. **Caveats / Limitations** (if any)\n\n"
+                "Rules:\n"
+                "- Do NOT guess missing values\n"
+                "- Only include information visible in the document\n\n"
+                f"User request:\n{prompt}"
+            )
 
         content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
         for img_b64 in images_base64:
@@ -461,9 +480,6 @@ class PDFVisionExtractTool(BaseTool):
 
 
 class PDFToImagesTool(BaseTool):
-    """
-    PDF to Images Tool (기존 유지)
-    """
     tool_id = "pdf.to_images"
     version = "1.0.0"
     name = "PDF to Images"
