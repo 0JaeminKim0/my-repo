@@ -21,9 +21,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies (including poppler for PDF to image conversion)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy backend requirements and install
