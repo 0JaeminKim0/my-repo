@@ -1,14 +1,17 @@
 # Build stage for frontend
 FROM node:20-slim AS frontend-builder
 
-WORKDIR /app/frontend
+WORKDIR /app
 
 # Copy frontend files
-COPY frontend/package*.json ./
-RUN npm ci
+COPY frontend/package*.json ./frontend/
+RUN cd frontend && npm ci
 
-COPY frontend/ ./
-RUN npm run build
+COPY frontend/ ./frontend/
+COPY backend/ ./backend/
+
+# Build frontend (outputs to backend/static)
+RUN cd frontend && npm run build
 
 
 # Production stage
@@ -26,10 +29,10 @@ COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy backend code
-COPY backend/ .
+COPY backend/app ./app
 
 # Copy built frontend from builder stage
-COPY --from=frontend-builder /app/frontend/../backend/static ./static
+COPY --from=frontend-builder /app/backend/static ./static
 
 # Create uploads directory
 RUN mkdir -p uploads
