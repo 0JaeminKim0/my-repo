@@ -8,7 +8,9 @@ COPY frontend/package*.json ./frontend/
 RUN cd frontend && npm ci
 
 COPY frontend/ ./frontend/
-COPY backend/ ./backend/
+
+# Create backend/static directory for build output
+RUN mkdir -p backend/static
 
 # Build frontend (outputs to backend/static)
 RUN cd frontend && npm run build
@@ -39,10 +41,9 @@ RUN mkdir -p uploads
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
-ENV PORT=3000
 
-# Expose port
+# Railway uses dynamic PORT
 EXPOSE 3000
 
-# Run the application
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "3000"]
+# Run the application - use shell form to expand $PORT
+CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-3000}
