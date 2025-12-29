@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { toolsApi, workflowsApi } from '../services/api'
+import { toolsApi, workflowsApi, filesApi } from '../services/api'
 import type { Tool, Workflow, WorkflowNode, InputMapping, NodePrompt } from '../types'
 
 // PRD 8.1: Node Input 설정 UI
@@ -15,6 +15,8 @@ interface NodeEditorProps {
 
 function NodeEditor({ node, tool, prevNodes, prevOutputs, onUpdate, onRemove }: NodeEditorProps) {
   const [isExpanded, setIsExpanded] = useState(true)
+  const [uploadingFile, setUploadingFile] = useState<string | null>(null)
+  const [uploadedFiles, setUploadedFiles] = useState<Record<string, { file_ref: string; filename: string }>>({})
 
   const updateInputMapping = (paramName: string, mapping: InputMapping) => {
     const newMapping = { ...node.input_mapping, [paramName]: mapping }
@@ -29,6 +31,29 @@ function NodeEditor({ node, tool, prevNodes, prevOutputs, onUpdate, onRemove }: 
       [field]: value
     }
     onUpdate({ ...node, prompt: newPrompt })
+  }
+
+  // File upload handler
+  const handleFileUpload = async (paramName: string, file: File) => {
+    setUploadingFile(paramName)
+    try {
+      const result = await filesApi.upload(file)
+      setUploadedFiles(prev => ({
+        ...prev,
+        [paramName]: { file_ref: result.file_ref, filename: result.filename }
+      }))
+      updateInputMapping(paramName, { type: 'constant', value: result.file_ref })
+    } catch (error: any) {
+      console.error('Failed to upload file:', error)
+      alert(error.response?.data?.error?.message || 'Failed to upload file')
+    } finally {
+      setUploadingFile(null)
+    }
+  }
+
+  // Check if parameter is a file reference
+  const isFileRefParam = (paramName: string) => {
+    return paramName.includes('file') || paramName === 'file_ref'
   }
 
   // Get available outputs from previous nodes
@@ -109,20 +134,80 @@ function NodeEditor({ node, tool, prevNodes, prevOutputs, onUpdate, onRemove }: 
                 
                 {/* Constant Input */}
                 {(!node.input_mapping[param.name] || node.input_mapping[param.name].type === 'constant') && (
-                  <input
-                    type="text"
-                    className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-                    placeholder={`Enter ${param.name}`}
-                    value={(node.input_mapping[param.name] as any)?.value || ''}
-                    onChange={(e) => {
-                      let value: any = e.target.value
-                      // Type conversion
-                      if (param.type === 'integer') value = parseInt(value) || 0
-                      if (param.type === 'number') value = parseFloat(value) || 0
-                      if (param.type === 'boolean') value = value === 'true'
-                      updateInputMapping(param.name, { type: 'constant', value })
-                    }}
-                  />
+                  <>
+                    {/* File Upload for file_ref parameters */}
+                    {isFileRefParam(param.name) ? (
+                      <div className="space-y-2">
+                        <div className="flex items-center space-x-2">
+                          <input
+                            type="text"
+                            className="flex-1 border border-gray-300 rounded px-3 py-2 text-sm bg-gray-100"
+                            placeholder="file_ref will appear here"
+                            value={(node.input_mapping[param.name] as any)?.value || ''}
+                            readOnly
+                          />
+                          <label className={`px-4 py-2 text-sm font-medium rounded-md cursor-pointer ${
+                            uploadingFile === param.name 
+                              ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                              : 'bg-indigo-600 text-white hover:bg-indigo-700'
+                          }`}>
+                            {uploadingFile === param.name ? (
+                              <span className="flex items-center">
+                                <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
+                                Uploading...
+                              </span>
+                            ) : (
+                              <>
+                                <svg className="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                                </svg>
+                                Upload File
+                              </>
+                            )}
+                            <input
+                              type="file"
+                              className="hidden"
+                              accept=".pdf,.txt,.json,.csv"
+                              disabled={uploadingFile === param.name}
+                              onChange={(e) => {
+                                const file = e.target.files?.[0]
+                                if (file) {
+                                  handleFileUpload(param.name, file)
+                                }
+                              }}
+                            />
+                          </label>
+                        </div>
+                        {uploadedFiles[param.name] && (
+                          <div className="flex items-center text-xs text-green-600">
+                            <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                            </svg>
+                            Uploaded: {uploadedFiles[param.name].filename}
+                          </div>
+                        )}
+                        <p className="text-xs text-gray-400">Supported: PDF, TXT, JSON, CSV (max 10MB)</p>
+                      </div>
+                    ) : (
+                      <input
+                        type="text"
+                        className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+                        placeholder={`Enter ${param.name}`}
+                        value={(node.input_mapping[param.name] as any)?.value || ''}
+                        onChange={(e) => {
+                          let value: any = e.target.value
+                          // Type conversion
+                          if (param.type === 'integer') value = parseInt(value) || 0
+                          if (param.type === 'number') value = parseFloat(value) || 0
+                          if (param.type === 'boolean') value = value === 'true'
+                          updateInputMapping(param.name, { type: 'constant', value })
+                        }}
+                      />
+                    )}
+                  </>
                 )}
                 
                 {/* PRD 8.1: From Previous Node Dropdown */}
