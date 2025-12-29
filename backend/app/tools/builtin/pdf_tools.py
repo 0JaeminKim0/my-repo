@@ -349,7 +349,7 @@ class PDFVisionExtractTool(BaseTool):
             first_page = int(pages_input)
             last_page = int(pages_input)
 
-        convert_kwargs = {"dpi": 150}
+        convert_kwargs = {"dpi": 400}
         if first_page:
             convert_kwargs["first_page"] = first_page
         if last_page:
@@ -369,7 +369,7 @@ class PDFVisionExtractTool(BaseTool):
 
                 for i in range(start_idx, min(end_idx, len(doc))):
                     page = doc[i]
-                    mat = fitz.Matrix(150 / 72, 150 / 72)
+                    mat = fitz.Matrix(400 / 72, 400 / 72)
                     pix = page.get_pixmap(matrix=mat)
                     img_data = pix.tobytes("png")
                     img = Image.open(io.BytesIO(img_data))
@@ -385,7 +385,7 @@ class PDFVisionExtractTool(BaseTool):
 
         images_base64 = []
         for img in images:
-            max_size = 2000
+            max_size = 6000
             if img.width > max_size or img.height > max_size:
                 ratio = min(max_size / img.width, max_size / img.height)
                 new_size = (int(img.width * ratio), int(img.height * ratio))
@@ -545,7 +545,7 @@ class PDFToImagesTool(BaseTool):
             type=ToolParameterType.INTEGER,
             description="이미지 해상도 DPI (기본값: 150)",
             required=False,
-            default=150
+            default=400
         )
     ]
 
@@ -565,7 +565,7 @@ class PDFToImagesTool(BaseTool):
     async def execute(self, inputs: dict, context: dict) -> dict:
         file_ref = inputs.get("file_ref")
         pages_input = inputs.get("pages", "all")
-        dpi = inputs.get("dpi", 150)
+        dpi = inputs.get("dpi", 400)
 
         file_service = context.get("file_service")
         if not file_service:

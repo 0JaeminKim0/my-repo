@@ -99,7 +99,7 @@ BUILTIN_TOOLS = [
     SummarizeTool(),
     TranslateTool(),
     # ExtractInfoTool(),
-    # AnalyzeTool(),
+    AnalyzeTool(),
     # GenerateTool(),
     # VisionExtractTool(),
     
