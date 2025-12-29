@@ -1,20 +1,22 @@
 """
-LLM Service - OpenAI Chat Completions API
+LLM Service - OpenAI Responses API (Standardized)
 """
 import httpx
 import json
-from typing import Optional
+from typing import Optional, Any
 from app.core.config import settings
 from app.core.errors import WorkflowError, ErrorCode
 
 
 class LLMService:
     """
-    OpenAI Chat Completions API 서비스
-    
+    OpenAI Responses API 서비스
+
     Gateway 경유하여 OpenAI API 호출
+    - 기존 chat_completion/vision_completion 인터페이스는 유지
+    - 내부 구현만 /responses로 표준화
     """
-    
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -23,105 +25,100 @@ class LLMService:
     ):
         self.api_key = api_key or settings.OPENAI_API_KEY
         self.api_base = api_base or settings.OPENAI_API_BASE
-        self.model = model or settings.OPENAI_MODEL
-        
+        self.model = model or settings.OPENAI_MODEL or "gpt-5"
+
         if not self.api_key:
             raise WorkflowError(
                 code=ErrorCode.INTERNAL_ERROR,
                 message="OpenAI API key not configured"
             )
-    
-    async def chat_completion(
-        self,
-        system_prompt: str,
-        user_prompt: str,
-        force_json: bool = False,
-        temperature: float = 0.7,
-        max_tokens: int = 2000
-    ) -> dict:
+        if not self.api_base:
+            raise WorkflowError(
+                code=ErrorCode.INTERNAL_ERROR,
+                message="OpenAI API base not configured"
+            )
+
+    # -------------------------
+    # Internal helpers
+    # -------------------------
+    def _join_url(self, path: str) -> str:
+        base = (self.api_base or "").rstrip("/")
+        path = (path or "").lstrip("/")
+        return f"{base}/{path}"
+
+    def _extract_output_text(self, resp_json: dict) -> str:
         """
-        Chat Completion 호출
-        
-        Args:
-            system_prompt: 시스템 프롬프트
-            user_prompt: 사용자 프롬프트
-            force_json: JSON 응답 강제 여부
-            temperature: 온도 (0.0 ~ 2.0)
-            max_tokens: 최대 토큰 수
-            
-        Returns:
-            {
-                "content": str,  # 응답 내용
-                "usage": {
-                    "prompt_tokens": int,
-                    "completion_tokens": int,
-                    "total_tokens": int
-                }
-            }
+        Responses API 응답에서 텍스트를 안전하게 추출
+        - output_text가 있으면 우선 사용
+        - 없으면 output[] -> message -> content[]의 output_text를 조립
         """
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-        
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens
+        if not isinstance(resp_json, dict):
+            return ""
+
+        ot = resp_json.get("output_text")
+        if isinstance(ot, str) and ot.strip():
+            return ot.strip()
+
+        chunks: list[str] = []
+        for item in resp_json.get("output", []) or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "message":
+                continue
+            for part in item.get("content", []) or []:
+                if isinstance(part, dict) and part.get("type") == "output_text":
+                    t = part.get("text", "")
+                    if isinstance(t, str) and t:
+                        chunks.append(t)
+        return "\n".join(chunks).strip()
+
+    def _map_usage_compat(self, usage: dict) -> dict:
+        """
+        기존 호환을 위해 prompt_tokens/completion_tokens 키로 제공.
+        Responses의 input_tokens/output_tokens를 매핑한다.
+        """
+        usage = usage or {}
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        total_tokens = usage.get("total_tokens", input_tokens + output_tokens)
+
+        return {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            # 표준화된 키도 함께 제공(향후 마이그레이션 용)
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
         }
-        
-        # JSON 모드 강제
-        if force_json:
-            payload["response_format"] = {"type": "json_object"}
-            # JSON 응답 힌트 추가
-            if "json" not in user_prompt.lower():
-                messages[-1]["content"] += "\n\nRespond in valid JSON format."
-        
+
+    async def _post_responses(self, payload: dict, timeout: float) -> dict:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
-        
+
+        url = self._join_url("/responses")
+
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(
-                    f"{self.api_base}/chat/completions",
-                    json=payload,
-                    headers=headers
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(url, json=payload, headers=headers)
+
+            if response.status_code != 200:
+                error_detail = response.text
+                try:
+                    error_json = response.json()
+                    error_detail = error_json.get("error", {}).get("message", error_detail)
+                except Exception:
+                    pass
+
+                raise WorkflowError(
+                    code=ErrorCode.LLM_API_ERROR,
+                    message=f"OpenAI API error: {error_detail}",
+                    details={"status_code": response.status_code, "error": error_detail}
                 )
-                
-                if response.status_code != 200:
-                    error_detail = response.text
-                    try:
-                        error_json = response.json()
-                        error_detail = error_json.get("error", {}).get("message", error_detail)
-                    except:
-                        pass
-                    
-                    raise WorkflowError(
-                        code=ErrorCode.LLM_API_ERROR,
-                        message=f"OpenAI API error: {error_detail}",
-                        details={
-                            "status_code": response.status_code,
-                            "error": error_detail
-                        }
-                    )
-                
-                result = response.json()
-                
-                content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-                usage = result.get("usage", {})
-                
-                return {
-                    "content": content,
-                    "usage": {
-                        "prompt_tokens": usage.get("prompt_tokens", 0),
-                        "completion_tokens": usage.get("completion_tokens", 0),
-                        "total_tokens": usage.get("total_tokens", 0)
-                    }
-                }
-                
+
+            return response.json()
+
         except httpx.TimeoutException:
             raise WorkflowError(
                 code=ErrorCode.LLM_API_ERROR,
@@ -135,7 +132,53 @@ class LLMService:
                 details={"error": str(e)},
                 retryable=True
             )
-    
+
+    # -------------------------
+    # Public APIs (kept compatible)
+    # -------------------------
+    async def chat_completion(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        force_json: bool = False,
+        temperature: float = 0.7,
+        max_tokens: int = 2000
+    ) -> dict:
+        """
+        Text completion via Responses API
+
+        Returns (compat):
+            {
+                "content": str,
+                "usage": {"prompt_tokens","completion_tokens","total_tokens", ...}
+            }
+        """
+
+        # JSON 응답 힌트는 Responses에서도 프롬프트에 추가 가능(선택)
+        if force_json and "json" not in (user_prompt or "").lower():
+            user_prompt = (user_prompt or "") + "\n\nRespond in valid JSON format."
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "instructions": system_prompt,
+            "input": [{
+                "role": "user",
+                "content": [{"type": "input_text", "text": user_prompt}],
+            }],
+            "max_output_tokens": int(max_tokens),
+            "temperature": float(temperature),
+        }
+
+        if force_json:
+            payload["text"] = {"format": {"type": "json_object"}}
+
+        resp_json = await self._post_responses(payload, timeout=120.0)
+
+        content = self._extract_output_text(resp_json)
+        usage = self._map_usage_compat(resp_json.get("usage", {}))
+
+        return {"content": content, "usage": usage}
+
     async def vision_completion(
         self,
         system_prompt: str,
@@ -147,121 +190,61 @@ class LLMService:
         model: str = None
     ) -> dict:
         """
-        Vision Completion 호출 (GPT-4o Vision API)
-        
+        Vision completion via Responses API
+
         Args:
-            system_prompt: 시스템 프롬프트
-            user_prompt: 사용자 프롬프트
-            image_base64_list: base64 인코딩된 이미지 리스트
-            force_json: JSON 응답 강제 여부
-            temperature: 온도 (0.0 ~ 2.0)
-            max_tokens: 최대 토큰 수
-            model: 사용할 모델 (기본값: gpt-4o)
-            
-        Returns:
+            image_base64_list: base64 문자열 리스트(순수 base64 또는 data URL)
+
+        Returns (compat):
             {
-                "content": str,  # 응답 내용
-                "usage": {
-                    "prompt_tokens": int,
-                    "completion_tokens": int,
-                    "total_tokens": int
-                }
+                "content": str,
+                "usage": {...},
+                "model": str
             }
         """
-        # Vision 지원 모델 사용 (gpt-4o 또는 gpt-4o-mini)
-        vision_model = model or "gpt-4o"
-        
-        # 이미지 content 구성
-        content_parts = [{"type": "text", "text": user_prompt}]
-        
+        vision_model = model or self.model or "gpt-5"
+
+        if not image_base64_list:
+            raise WorkflowError(
+                code=ErrorCode.TOOL_INPUT_INVALID,
+                message="No images provided",
+                details={"images_count": 0}
+            )
+
+        if force_json and "json" not in (user_prompt or "").lower():
+            user_prompt = (user_prompt or "") + "\n\nRespond in valid JSON format."
+
+        content_parts: list[dict[str, Any]] = [{"type": "input_text", "text": user_prompt}]
+
         for img_base64 in image_base64_list:
-            # data:image/png;base64, 형식인지 확인
+            # data URL로 정규화
+            if not isinstance(img_base64, str):
+                continue
             if not img_base64.startswith("data:"):
                 img_base64 = f"data:image/png;base64,{img_base64}"
-            
+
             content_parts.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": img_base64,
-                    "detail": "high"  # high detail for better OCR
-                }
+                "type": "input_image",
+                "image_url": img_base64
             })
-        
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": content_parts}
-        ]
-        
-        payload = {
+
+        payload: dict[str, Any] = {
             "model": vision_model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens
+            "instructions": system_prompt,
+            "input": [{
+                "role": "user",
+                "content": content_parts
+            }],
+            "max_output_tokens": int(max_tokens),
+            "temperature": float(temperature),
         }
-        
-        # JSON 모드 강제
+
         if force_json:
-            payload["response_format"] = {"type": "json_object"}
-            # JSON 응답 힌트 추가
-            if "json" not in user_prompt.lower():
-                content_parts[0]["text"] += "\n\nRespond in valid JSON format."
-        
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        try:
-            async with httpx.AsyncClient(timeout=180.0) as client:  # Vision은 더 긴 타임아웃
-                response = await client.post(
-                    f"{self.api_base}/chat/completions",
-                    json=payload,
-                    headers=headers
-                )
-                
-                if response.status_code != 200:
-                    error_detail = response.text
-                    try:
-                        error_json = response.json()
-                        error_detail = error_json.get("error", {}).get("message", error_detail)
-                    except:
-                        pass
-                    
-                    raise WorkflowError(
-                        code=ErrorCode.LLM_API_ERROR,
-                        message=f"OpenAI Vision API error: {error_detail}",
-                        details={
-                            "status_code": response.status_code,
-                            "error": error_detail,
-                            "model": vision_model
-                        }
-                    )
-                
-                result = response.json()
-                
-                content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-                usage = result.get("usage", {})
-                
-                return {
-                    "content": content,
-                    "usage": {
-                        "prompt_tokens": usage.get("prompt_tokens", 0),
-                        "completion_tokens": usage.get("completion_tokens", 0),
-                        "total_tokens": usage.get("total_tokens", 0)
-                    },
-                    "model": vision_model
-                }
-                
-        except httpx.TimeoutException:
-            raise WorkflowError(
-                code=ErrorCode.LLM_API_ERROR,
-                message="OpenAI Vision API timeout",
-                retryable=True
-            )
-        except httpx.RequestError as e:
-            raise WorkflowError(
-                code=ErrorCode.LLM_API_ERROR,
-                message=f"OpenAI Vision API request error: {str(e)}",
-                details={"error": str(e)},
-                retryable=True
-            )
+            payload["text"] = {"format": {"type": "json_object"}}
+
+        resp_json = await self._post_responses(payload, timeout=180.0)
+
+        content = self._extract_output_text(resp_json)
+        usage = self._map_usage_compat(resp_json.get("usage", {}))
+
+        return {"content": content, "usage": usage, "model": vision_model}
