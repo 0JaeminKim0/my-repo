@@ -5,19 +5,23 @@ import remarkGfm from 'remark-gfm'
 import { runsApi, workflowsApi } from '../services/api'
 import type { Run, Workflow, NodeTrace } from '../types'
 
-// Markdown 텍스트인지 판단
+// Markdown 텍스트인지 판단 (더 관대하게)
 function isMarkdownText(value: unknown): boolean {
   if (typeof value !== 'string') return false
+  if (value.length < 50) return false  // 너무 짧으면 스킵
+  
   // Markdown 특징: 헤더, 리스트, 코드블록, 링크, 테이블 등
   const markdownPatterns = [
     /^#{1,6}\s/m,           // 헤더
-    /^\s*[-*+]\s/m,         // 리스트
-    /^\s*\d+\.\s/m,         // 숫자 리스트
+    /\n\s*[-*+]\s/,         // 리스트 (줄바꿈 후)
+    /^\s*[-*+]\s/m,         // 리스트 (줄 시작)
+    /\n\s*\d+\.\s/,         // 숫자 리스트
     /```[\s\S]*```/,        // 코드블록
     /\[.*\]\(.*\)/,         // 링크
     /\|.*\|.*\|/,           // 테이블
     /\*\*.*\*\*/,           // 볼드
     /^\s*>/m,               // 인용
+    /\n\n/,                 // 단락 구분 (2개 이상 줄바꿈)
   ]
   return markdownPatterns.some(pattern => pattern.test(value))
 }
@@ -44,12 +48,12 @@ function OutputRenderer({ data, showToggle = false }: { data: unknown; showToggl
     }
     if (typeof obj === 'object' && obj !== null) {
       const o = obj as Record<string, unknown>
-      // raw_text 우선 체크
+      // raw_text 우선 체크 (길이가 100자 이상이면 마크다운으로 간주)
       if (typeof o.raw_text === 'string' && o.raw_text.length > 100) {
         return o.raw_text
       }
-      // result가 문자열이면 체크
-      if (typeof o.result === 'string' && isMarkdownText(o.result)) {
+      // result가 문자열이고 길이가 100자 이상이면 마크다운으로 간주
+      if (typeof o.result === 'string' && o.result.length > 100) {
         return o.result
       }
     }
