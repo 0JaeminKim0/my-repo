@@ -265,6 +265,216 @@ class GenerateTool(LLMTool):
     ]
 
 
+class VisionExtractTool(BaseTool):
+    """
+    Vision Extract Tool (GPT-4o 기반)
+    
+    이미지에서 GPT-4o Vision으로 정보를 추출합니다.
+    PDF to Images Tool과 연결하여 사용하거나,
+    직접 이미지 base64를 입력받아 분석합니다.
+    
+    Input:
+        - images: base64 이미지 배열 (PDF to Images 출력과 연결)
+        - prompt: 추출/분석 지시사항 (자연어)
+        - output_format: 출력 형식 ("text", "json")
+    
+    Output:
+        - result: GPT-4o Vision 분석 결과
+        - raw_text: 원본 텍스트 응답
+    
+    Workflow 예시:
+        [pdf.to_images] → images → [llm.vision_extract]
+        프롬프트: "이 문서에서 계약 금액, 날짜, 서명자를 추출해줘"
+    """
+    
+    tool_id = "llm.vision_extract"
+    version = "1.0.0"
+    name = "Vision Extractor (GPT-4o)"
+    description = "이미지에서 GPT-4o Vision으로 정보를 추출합니다. 표, 차트, 손글씨 인식 가능."
+    category = "llm"
+    has_prompt = False  # 프롬프트는 input으로 직접 받음
+    
+    input_schema = [
+        ToolParameter(
+            name="images",
+            type=ToolParameterType.ARRAY,
+            description="base64 인코딩된 이미지 배열 (pdf.to_images 출력과 연결)",
+            required=True
+        ),
+        ToolParameter(
+            name="prompt",
+            type=ToolParameterType.STRING,
+            description="추출/분석 지시사항 (예: '이 이미지에서 텍스트를 모두 추출해줘')",
+            required=True
+        ),
+        ToolParameter(
+            name="output_format",
+            type=ToolParameterType.STRING,
+            description="출력 형식: 'text' 또는 'json' (기본값: 'json')",
+            required=False,
+            default="json"
+        ),
+        ToolParameter(
+            name="model",
+            type=ToolParameterType.STRING,
+            description="사용할 모델: 'gpt-4o' 또는 'gpt-4o-mini' (기본값: 'gpt-4o')",
+            required=False,
+            default="gpt-4o"
+        )
+    ]
+    
+    output_schema = [
+        ToolParameter(
+            name="result",
+            type=ToolParameterType.OBJECT,
+            description="GPT-4o Vision 분석 결과"
+        ),
+        ToolParameter(
+            name="raw_text",
+            type=ToolParameterType.STRING,
+            description="원본 텍스트 응답"
+        )
+    ]
+    
+    async def execute(self, inputs: dict, context: dict) -> dict:
+        """Vision 분석 실행"""
+        import httpx
+        import json
+        from app.core.config import settings
+        
+        images = inputs.get("images", [])
+        prompt = inputs.get("prompt", "")
+        output_format = inputs.get("output_format", "json")
+        model = inputs.get("model", "gpt-4o")
+        
+        if not images:
+            raise WorkflowError(
+                code=ErrorCode.TOOL_INPUT_INVALID,
+                message="No images provided",
+                details={"images_count": 0}
+            )
+        
+        if not prompt:
+            raise WorkflowError(
+                code=ErrorCode.TOOL_INPUT_INVALID,
+                message="Prompt is required",
+                details={}
+            )
+        
+        api_key = settings.OPENAI_API_KEY
+        api_base = settings.OPENAI_API_BASE
+        
+        if not api_key:
+            raise WorkflowError(
+                code=ErrorCode.INTERNAL_ERROR,
+                message="OpenAI API key not configured"
+            )
+        
+        # 시스템 프롬프트 구성
+        system_prompt = """You are an expert document and image analyzer. 
+Analyze the provided images and extract information as requested.
+Be thorough and accurate. If you can't find certain information, explicitly state that."""
+        
+        if output_format == "json":
+            system_prompt += "\n\nIMPORTANT: Respond in valid JSON format only."
+        
+        # 메시지 구성 (이미지들 포함)
+        content = [{"type": "text", "text": prompt}]
+        
+        for img_base64 in images:
+            # data:image/png;base64, 형식인지 확인
+            if not img_base64.startswith("data:"):
+                img_base64 = f"data:image/png;base64,{img_base64}"
+            
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": img_base64,
+                    "detail": "high"
+                }
+            })
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": content}
+        ]
+        
+        payload = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": 4000,
+            "temperature": 0.2
+        }
+        
+        if output_format == "json":
+            payload["response_format"] = {"type": "json_object"}
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        try:
+            async with httpx.AsyncClient(timeout=180.0) as client:
+                response = await client.post(
+                    f"{api_base}/chat/completions",
+                    json=payload,
+                    headers=headers
+                )
+                
+                if response.status_code != 200:
+                    error_detail = response.text
+                    try:
+                        error_json = response.json()
+                        error_detail = error_json.get("error", {}).get("message", error_detail)
+                    except:
+                        pass
+                    
+                    raise WorkflowError(
+                        code=ErrorCode.LLM_API_ERROR,
+                        message=f"OpenAI Vision API error: {error_detail}",
+                        details={"status_code": response.status_code, "model": model}
+                    )
+                
+                result = response.json()
+                content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                
+                # 토큰 사용량 기록
+                usage = result.get("usage", {})
+                context["token_usage"] = {
+                    "prompt_tokens": usage.get("prompt_tokens", 0),
+                    "completion_tokens": usage.get("completion_tokens", 0),
+                    "total_tokens": usage.get("total_tokens", 0)
+                }
+                
+                # JSON 파싱 시도
+                parsed = None
+                if output_format == "json":
+                    try:
+                        parsed = json.loads(content)
+                    except json.JSONDecodeError:
+                        parsed = {"raw_response": content}
+                
+                return {
+                    "result": parsed if parsed else content,
+                    "raw_text": content
+                }
+                
+        except httpx.TimeoutException:
+            raise WorkflowError(
+                code=ErrorCode.LLM_API_ERROR,
+                message="OpenAI Vision API timeout",
+                retryable=True
+            )
+        except httpx.RequestError as e:
+            raise WorkflowError(
+                code=ErrorCode.LLM_API_ERROR,
+                message=f"OpenAI Vision API request error: {str(e)}",
+                details={"error": str(e)},
+                retryable=True
+            )
+
+
 # =============================================================================
 # 새로운 LLM Tool 추가 방법
 # =============================================================================

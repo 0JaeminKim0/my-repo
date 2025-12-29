@@ -39,6 +39,8 @@
 from app.tools.builtin.pdf_tools import (
     PDFExtractTool,
     PDFInfoTool,
+    PDFToImagesTool,
+    PDFVisionExtractTool,
 )
 
 # =============================================================================
@@ -50,6 +52,7 @@ from app.tools.builtin.llm_tools import (
     ExtractInfoTool,
     AnalyzeTool,
     GenerateTool,
+    VisionExtractTool,
 )
 
 # =============================================================================
@@ -87,6 +90,8 @@ BUILTIN_TOOLS = [
     # =========================================
     PDFExtractTool(),
     PDFInfoTool(),
+    PDFToImagesTool(),
+    PDFVisionExtractTool(),
     
     # =========================================
     # LLM Tools
@@ -96,6 +101,7 @@ BUILTIN_TOOLS = [
     ExtractInfoTool(),
     AnalyzeTool(),
     GenerateTool(),
+    VisionExtractTool(),
     
     # =========================================
     # Text Tools
@@ -132,12 +138,15 @@ __all__ = [
     # PDF
     "PDFExtractTool",
     "PDFInfoTool",
+    "PDFToImagesTool",
+    "PDFVisionExtractTool",
     # LLM
     "SummarizeTool",
     "TranslateTool",
     "ExtractInfoTool",
     "AnalyzeTool",
     "GenerateTool",
+    "VisionExtractTool",
     # Text
     "TextFormatTool",
     "TextSplitTool",
