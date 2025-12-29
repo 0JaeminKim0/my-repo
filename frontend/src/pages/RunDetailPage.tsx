@@ -1,7 +1,111 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { runsApi, workflowsApi } from '../services/api'
 import type { Run, Workflow, NodeTrace } from '../types'
+
+// Markdown 텍스트인지 판단
+function isMarkdownText(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  // Markdown 특징: 헤더, 리스트, 코드블록, 링크, 테이블 등
+  const markdownPatterns = [
+    /^#{1,6}\s/m,           // 헤더
+    /^\s*[-*+]\s/m,         // 리스트
+    /^\s*\d+\.\s/m,         // 숫자 리스트
+    /```[\s\S]*```/,        // 코드블록
+    /\[.*\]\(.*\)/,         // 링크
+    /\|.*\|.*\|/,           // 테이블
+    /\*\*.*\*\*/,           // 볼드
+    /^\s*>/m,               // 인용
+  ]
+  return markdownPatterns.some(pattern => pattern.test(value))
+}
+
+// Markdown 렌더러 컴포넌트
+function MarkdownRenderer({ content }: { content: string }) {
+  return (
+    <div className="prose prose-sm max-w-none prose-headings:text-gray-800 prose-p:text-gray-600 prose-li:text-gray-600 prose-strong:text-gray-800 prose-code:bg-gray-100 prose-code:px-1 prose-code:rounded prose-pre:bg-gray-800 prose-pre:text-gray-100 prose-table:border prose-th:bg-gray-100 prose-th:p-2 prose-td:p-2 prose-td:border">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+        {content}
+      </ReactMarkdown>
+    </div>
+  )
+}
+
+// Output 렌더러 - Markdown이면 렌더링, 아니면 JSON
+function OutputRenderer({ data, showToggle = false }: { data: unknown; showToggle?: boolean }) {
+  const [viewMode, setViewMode] = useState<'rendered' | 'raw'>('rendered')
+  
+  // raw_text 또는 result 필드에서 Markdown 추출
+  const getMarkdownContent = (obj: unknown): string | null => {
+    if (typeof obj === 'string' && isMarkdownText(obj)) {
+      return obj
+    }
+    if (typeof obj === 'object' && obj !== null) {
+      const o = obj as Record<string, unknown>
+      // raw_text 우선 체크
+      if (typeof o.raw_text === 'string' && o.raw_text.length > 100) {
+        return o.raw_text
+      }
+      // result가 문자열이면 체크
+      if (typeof o.result === 'string' && isMarkdownText(o.result)) {
+        return o.result
+      }
+    }
+    return null
+  }
+  
+  const markdownContent = getMarkdownContent(data)
+  const hasMarkdown = markdownContent !== null
+  
+  if (!hasMarkdown) {
+    return (
+      <pre className="text-sm text-gray-700 bg-gray-50 p-4 rounded overflow-x-auto">
+        {JSON.stringify(data, null, 2)}
+      </pre>
+    )
+  }
+  
+  return (
+    <div>
+      {showToggle && (
+        <div className="flex space-x-2 mb-3">
+          <button
+            onClick={() => setViewMode('rendered')}
+            className={`px-3 py-1 text-sm rounded ${
+              viewMode === 'rendered' 
+                ? 'bg-indigo-600 text-white' 
+                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+            }`}
+          >
+            Rendered
+          </button>
+          <button
+            onClick={() => setViewMode('raw')}
+            className={`px-3 py-1 text-sm rounded ${
+              viewMode === 'raw' 
+                ? 'bg-indigo-600 text-white' 
+                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+            }`}
+          >
+            Raw JSON
+          </button>
+        </div>
+      )}
+      
+      {viewMode === 'rendered' ? (
+        <div className="bg-white border border-gray-200 rounded-lg p-4 overflow-x-auto">
+          <MarkdownRenderer content={markdownContent} />
+        </div>
+      ) : (
+        <pre className="text-sm text-gray-700 bg-gray-50 p-4 rounded overflow-x-auto">
+          {JSON.stringify(data, null, 2)}
+        </pre>
+      )}
+    </div>
+  )
+}
 
 // PRD 8.2: Run Trace View
 function NodeTraceCard({ trace, isLast }: { trace: NodeTrace; isLast: boolean }) {
@@ -126,13 +230,13 @@ function NodeTraceCard({ trace, isLast }: { trace: NodeTrace; isLast: boolean })
                 </pre>
               </div>
               
-              {/* Output Summary - PRD 8.2: 출력 요약 */}
+              {/* Output Summary - PRD 8.2: 출력 요약 (Markdown 지원) */}
               {trace.status === 'SUCCESS' && (
                 <div>
                   <h4 className="text-sm font-medium text-gray-700 mb-1">Output</h4>
-                  <pre className="text-xs text-gray-600 bg-gray-100 p-2 rounded overflow-x-auto max-h-40">
-                    {JSON.stringify(trace.output_summary, null, 2)}
-                  </pre>
+                  <div className="bg-gray-100 p-2 rounded overflow-x-auto max-h-96">
+                    <OutputRenderer data={trace.output_summary} />
+                  </div>
                 </div>
               )}
               
@@ -310,13 +414,11 @@ function RunDetailPage() {
         )}
       </div>
 
-      {/* Final Output */}
+      {/* Final Output - Markdown 렌더링 + 토글 */}
       {run.final_output && (
         <div className="bg-white rounded-lg border border-gray-200 p-6 mb-6">
           <h2 className="text-lg font-medium text-gray-900 mb-4">Final Output</h2>
-          <pre className="text-sm text-gray-700 bg-gray-50 p-4 rounded overflow-x-auto">
-            {JSON.stringify(run.final_output, null, 2)}
-          </pre>
+          <OutputRenderer data={run.final_output} showToggle={true} />
         </div>
       )}
 
@@ -328,9 +430,7 @@ function RunDetailPage() {
             {Object.entries(run.node_outputs).map(([nodeId, output]) => (
               <div key={nodeId} className="border border-gray-200 rounded-lg p-4">
                 <h3 className="font-mono text-sm font-medium text-indigo-600 mb-2">{nodeId}</h3>
-                <pre className="text-xs text-gray-600 bg-gray-50 p-3 rounded overflow-x-auto max-h-60">
-                  {JSON.stringify(output, null, 2)}
-                </pre>
+                <OutputRenderer data={output} showToggle={true} />
               </div>
             ))}
           </div>
