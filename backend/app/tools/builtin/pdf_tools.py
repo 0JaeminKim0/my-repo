@@ -1,19 +1,22 @@
 """
 =============================================================================
-PDF 관련 Tool들 (Responses API 표준화 - 완성본)
+PDF 관련 Tool들 (Responses API 표준화 - 최종 완성본)
 =============================================================================
 
+변경 요약
 - PDFExtractTool / PDFInfoTool / PDFToImagesTool: 기존 로직 유지
 - PDFVisionExtractTool: OpenAI Responses API(/v1/responses)로 표준화
   * instructions + input
   * 멀티모달: input_text / input_image
   * JSON 강제: text.format = {"type": "json_object"}
+  * (중요) JSON 강제 시 입력에 'json' 단어가 반드시 포함되어야 하므로 prompt에 자동 보정
   * 응답 파싱: output_text 우선, 없으면 output[]에서 output_text 조립
   * usage: input_tokens/output_tokens/total_tokens 기록
 
-주의:
+환경 주의
 - settings.OPENAI_API_BASE 는 반드시 "https://api.openai.com/v1" 형태여야 함
-  (코드에서 "/responses"를 추가로 붙임)
+  (코드에서 "/responses"를 붙임)
+
 =============================================================================
 """
 
@@ -439,6 +442,11 @@ class PDFVisionExtractTool(BaseTool):
             "Analyze the provided PDF page images and extract information as requested. "
             "Be thorough and accurate. If you can't find certain information, explicitly state that."
         )
+
+        # JSON 모드 강제 시: Responses 정책상 입력에 'json' 문자열이 반드시 포함되어야 함
+        if output_format == "json":
+            if "json" not in (prompt or "").lower():
+                prompt = (prompt or "").rstrip() + "\n\nReturn the result in JSON format. Respond with valid JSON only."
 
         content = [{"type": "input_text", "text": prompt}]
         for img_base64 in images_base64:
