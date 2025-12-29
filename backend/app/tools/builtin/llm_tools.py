@@ -187,7 +187,7 @@ class AnalyzeTool(LLMTool):
     tool_id = "llm.analyze"
     version = "1.0.0"
     name = "Text Analyzer"
-    description = "LLM을 사용하여 텍스트를 분석합니다"
+    description = "LLM을 사용하여 데이터를 분석합니다"
     category = "llm"
     
     default_system_prompt = "You are an expert text analyst. Provide thorough and insightful analysis."

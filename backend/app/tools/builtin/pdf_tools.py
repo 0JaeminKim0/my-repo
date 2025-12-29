@@ -499,10 +499,9 @@ Be thorough and accurate. If you can't find certain information, explicitly stat
         ]
         
         payload = {
-            "model": "gpt-4o",  # GPT-4o Vision
+            "model": "gpt-5",  
             "messages": messages,
-            "max_tokens": 4000,
-            "temperature": 0.2
+            "max_tokens": 16000,
         }
         
         if output_format == "json":
