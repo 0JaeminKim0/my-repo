@@ -37,11 +37,13 @@ COPY backend/app ./app
 # Copy built frontend from builder stage
 COPY --from=frontend-builder /app/backend/static ./static
 
-# Create uploads directory
-RUN mkdir -p uploads
+# Create directories for uploads and data (Volume mount point)
+RUN mkdir -p uploads /app/data
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
+# Railway Volume을 사용할 경우 DATA_DIR=/app/data 환경변수 설정 필요
+ENV DATA_DIR=/app/data
 
 # Railway uses dynamic PORT
 EXPOSE 3000
