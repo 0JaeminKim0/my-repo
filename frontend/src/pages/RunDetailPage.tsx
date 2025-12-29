@@ -1,7 +1,79 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
+import ReactMarkdown from 'react-markdown'
 import { runsApi, workflowsApi } from '../services/api'
 import type { Run, Workflow, NodeTrace } from '../types'
+
+// Markdown으로 렌더링할 필드들
+const MARKDOWN_FIELDS = ['raw_text', 'extracted_text', 'result', 'summary', 'translated', 'generated', 'analysis']
+
+// 값이 마크다운으로 렌더링할 수 있는 문자열인지 확인
+const isMarkdownRenderable = (key: string, value: unknown): boolean => {
+  return MARKDOWN_FIELDS.includes(key) && typeof value === 'string' && value.length > 50
+}
+
+// Output을 렌더링하는 컴포넌트
+function OutputRenderer({ data, depth = 0 }: { data: unknown; depth?: number }) {
+  if (data === null || data === undefined) {
+    return <span className="text-gray-400">null</span>
+  }
+
+  if (typeof data === 'string') {
+    // 긴 텍스트는 마크다운으로 렌더링
+    if (data.length > 100) {
+      return (
+        <div className="prose prose-sm max-w-none bg-white p-4 rounded border">
+          <ReactMarkdown>{data}</ReactMarkdown>
+        </div>
+      )
+    }
+    return <span className="text-green-700">"{data}"</span>
+  }
+
+  if (typeof data === 'number' || typeof data === 'boolean') {
+    return <span className="text-blue-700">{String(data)}</span>
+  }
+
+  if (Array.isArray(data)) {
+    if (data.length === 0) return <span className="text-gray-500">[]</span>
+    return (
+      <div className="ml-4">
+        {data.map((item, index) => (
+          <div key={index} className="flex">
+            <span className="text-gray-400 mr-2">[{index}]</span>
+            <OutputRenderer data={item} depth={depth + 1} />
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  if (typeof data === 'object') {
+    const entries = Object.entries(data as Record<string, unknown>)
+    if (entries.length === 0) return <span className="text-gray-500">{'{}'}</span>
+    
+    return (
+      <div className={depth > 0 ? "ml-4" : ""}>
+        {entries.map(([key, value]) => (
+          <div key={key} className="mb-2">
+            <span className="text-purple-700 font-medium">{key}:</span>
+            {isMarkdownRenderable(key, value) ? (
+              <div className="mt-2 prose prose-sm max-w-none bg-white p-4 rounded border border-gray-200">
+                <ReactMarkdown>{value as string}</ReactMarkdown>
+              </div>
+            ) : (
+              <span className="ml-2">
+                <OutputRenderer data={value} depth={depth + 1} />
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  return <span>{String(data)}</span>
+}
 
 // PRD 8.2: Run Trace View
 function NodeTraceCard({ trace, isLast }: { trace: NodeTrace; isLast: boolean }) {
@@ -130,9 +202,9 @@ function NodeTraceCard({ trace, isLast }: { trace: NodeTrace; isLast: boolean })
               {trace.status === 'SUCCESS' && (
                 <div>
                   <h4 className="text-sm font-medium text-gray-700 mb-1">Output</h4>
-                  <pre className="text-xs text-gray-600 bg-gray-100 p-2 rounded overflow-x-auto max-h-40">
-                    {JSON.stringify(trace.output_summary, null, 2)}
-                  </pre>
+                  <div className="text-sm bg-gray-50 p-3 rounded overflow-x-auto max-h-96 overflow-y-auto">
+                    <OutputRenderer data={trace.output_summary} />
+                  </div>
                 </div>
               )}
               
@@ -314,9 +386,9 @@ function RunDetailPage() {
       {run.final_output && (
         <div className="bg-white rounded-lg border border-gray-200 p-6 mb-6">
           <h2 className="text-lg font-medium text-gray-900 mb-4">Final Output</h2>
-          <pre className="text-sm text-gray-700 bg-gray-50 p-4 rounded overflow-x-auto">
-            {JSON.stringify(run.final_output, null, 2)}
-          </pre>
+          <div className="text-sm bg-gray-50 p-4 rounded overflow-x-auto max-h-[600px] overflow-y-auto">
+            <OutputRenderer data={run.final_output} />
+          </div>
         </div>
       )}
 
@@ -328,9 +400,9 @@ function RunDetailPage() {
             {Object.entries(run.node_outputs).map(([nodeId, output]) => (
               <div key={nodeId} className="border border-gray-200 rounded-lg p-4">
                 <h3 className="font-mono text-sm font-medium text-indigo-600 mb-2">{nodeId}</h3>
-                <pre className="text-xs text-gray-600 bg-gray-50 p-3 rounded overflow-x-auto max-h-60">
-                  {JSON.stringify(output, null, 2)}
-                </pre>
+                <div className="text-sm bg-gray-50 p-3 rounded overflow-x-auto max-h-[400px] overflow-y-auto">
+                  <OutputRenderer data={output} />
+                </div>
               </div>
             ))}
           </div>
