@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     # OpenAI API (Gateway 경유)
     OPENAI_API_KEY: str = ""
     OPENAI_API_BASE: str = "https://api.openai.com/v1"
-    OPENAI_MODEL: str = "gpt-4o-mini"
+    OPENAI_MODEL: str = "gpt-5"
     
     # CORS
     CORS_ORIGINS: str = "*"

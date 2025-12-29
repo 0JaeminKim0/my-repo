@@ -88,9 +88,9 @@ BUILTIN_TOOLS = [
     # =========================================
     # PDF Tools
     # =========================================
-    PDFExtractTool(),
-    PDFInfoTool(),
-    PDFToImagesTool(),
+    # PDFExtractTool(),
+    # PDFInfoTool(),
+    # PDFToImagesTool(),
     PDFVisionExtractTool(),
     
     # =========================================
@@ -98,30 +98,30 @@ BUILTIN_TOOLS = [
     # =========================================
     SummarizeTool(),
     TranslateTool(),
-    ExtractInfoTool(),
-    AnalyzeTool(),
-    GenerateTool(),
-    VisionExtractTool(),
+    # ExtractInfoTool(),
+    # AnalyzeTool(),
+    # GenerateTool(),
+    # VisionExtractTool(),
     
     # =========================================
     # Text Tools
     # =========================================
-    TextFormatTool(),
-    TextSplitTool(),
-    TextJoinTool(),
-    TextReplaceTool(),
-    TextTemplateTool(),
-    TextStatsTool(),
-    JSONParseTool(),
+    # TextFormatTool(),
+    # TextSplitTool(),
+    # TextJoinTool(),
+    # TextReplaceTool(),
+    # TextTemplateTool(),
+    # TextStatsTool(),
+    # JSONParseTool(),
     
     # =========================================
     # Data Tools
     # =========================================
-    DataMapTool(),
-    DataFilterTool(),
-    DataMergeTool(),
-    DataSelectTool(),
-    DataTransformTool(),
+    # DataMapTool(),
+    # DataFilterTool(),
+    # DataMergeTool(),
+    # DataSelectTool(),
+    # DataTransformTool(),
     
     # =========================================
     # 새로운 Tool을 여기에 추가하세요
