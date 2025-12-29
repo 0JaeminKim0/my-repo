@@ -60,8 +60,8 @@ class SummarizeTool(LLMTool):
     category = "llm"
     
     default_system_prompt = "You are a professional text summarizer. Provide clear and concise summaries."
-    default_temperature = 0.5
-    default_max_tokens = 1000
+    # default_temperature = 0.5
+    default_max_tokens = 10000
     
     input_schema = [
         ToolParameter(
@@ -289,8 +289,8 @@ class VisionExtractTool(BaseTool):
     
     tool_id = "llm.vision_extract"
     version = "1.0.0"
-    name = "Vision Extractor (GPT-4o)"
-    description = "이미지에서 GPT-4o Vision으로 정보를 추출합니다. 표, 차트, 손글씨 인식 가능."
+    name = "Vision Extractor (GPT-5)"
+    description = "이미지에서 GPT-5 Vision으로 정보를 추출합니다. 표, 차트, 손글씨 인식 가능."
     category = "llm"
     has_prompt = False  # 프롬프트는 input으로 직접 받음
     
@@ -317,9 +317,9 @@ class VisionExtractTool(BaseTool):
         ToolParameter(
             name="model",
             type=ToolParameterType.STRING,
-            description="사용할 모델: 'gpt-4o' 또는 'gpt-4o-mini' (기본값: 'gpt-4o')",
+            description="사용할 모델: 'gpt-5' 또는 'gpt-5' (기본값: 'gpt-5')",
             required=False,
-            default="gpt-4o"
+            default="gpt-5"
         )
     ]
     
@@ -327,7 +327,7 @@ class VisionExtractTool(BaseTool):
         ToolParameter(
             name="result",
             type=ToolParameterType.OBJECT,
-            description="GPT-4o Vision 분석 결과"
+            description="GPT-5 Vision 분석 결과"
         ),
         ToolParameter(
             name="raw_text",
@@ -345,7 +345,7 @@ class VisionExtractTool(BaseTool):
         images = inputs.get("images", [])
         prompt = inputs.get("prompt", "")
         output_format = inputs.get("output_format", "json")
-        model = inputs.get("model", "gpt-4o")
+        model = inputs.get("model", "gpt-5")
         
         if not images:
             raise WorkflowError(
@@ -401,9 +401,8 @@ Be thorough and accurate. If you can't find certain information, explicitly stat
         
         payload = {
             "model": model,
-            "messages": messages,
-            "max_tokens": 4000,
-            "temperature": 0.2
+            "input": messages,
+            "max_output_tokens": 16000,
         }
         
         if output_format == "json":

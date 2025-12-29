@@ -500,8 +500,8 @@ Be thorough and accurate. If you can't find certain information, explicitly stat
         
         payload = {
             "model": "gpt-5",  
-            "messages": messages,
-            "max_tokens": 16000,
+            "input": messages,
+            "max_output_tokens": 16000,
         }
         
         if output_format == "json":
